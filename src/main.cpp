@@ -113,6 +113,14 @@ std::optional<fs::path> findFromAncestors(const fs::path &relative)
     return std::nullopt;
 }
 
+std::optional<fs::path> findAfterEgyptAssetsDir()
+{
+    if (const auto path = findFromAncestors("after-egypt-sdl3/assets/AfterEgypt")) return path;
+    if (const auto path = findFromAncestors("assets/AfterEgypt")) return path;
+    if (const auto path = findFromAncestors("TinkerOS/Apps/AfterEgypt")) return path;
+    return std::nullopt;
+}
+
 std::string trim(std::string text)
 {
     auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
@@ -170,7 +178,13 @@ class TextAssets {
 public:
     void load()
     {
-        if (const auto path = findFromAncestors("TempleOS/Misc/Bible.TXT")) {
+        if (const auto path = findFromAncestors("after-egypt-sdl3/assets/Bible.TXT")) {
+            bibleLines_ = readTextLines(*path);
+            biblePath_ = *path;
+        } else if (const auto path = findFromAncestors("assets/Bible.TXT")) {
+            bibleLines_ = readTextLines(*path);
+            biblePath_ = *path;
+        } else if (const auto path = findFromAncestors("TempleOS/Misc/Bible.TXT")) {
             bibleLines_ = readTextLines(*path);
             biblePath_ = *path;
         } else if (const auto path = findFromAncestors("TinkerOS/Misc/Bible.TXT")) {
@@ -178,13 +192,21 @@ public:
             biblePath_ = *path;
         }
 
-        if (const auto path = findFromAncestors("TinkerOS/Adam/God/Vocab.DD")) {
+        if (const auto path = findFromAncestors("after-egypt-sdl3/assets/God/Vocab.DD")) {
+            loadVocab(*path);
+        } else if (const auto path = findFromAncestors("assets/God/Vocab.DD")) {
+            loadVocab(*path);
+        } else if (const auto path = findFromAncestors("TinkerOS/Adam/God/Vocab.DD")) {
             loadVocab(*path);
         } else if (const auto path = findFromAncestors("TempleOS/Adam/God/Vocab.DD")) {
             loadVocab(*path);
         }
 
-        if (const auto path = findFromAncestors("TinkerOS/Adam/God/HSNotes.DD")) {
+        if (const auto path = findFromAncestors("after-egypt-sdl3/assets/God/HSNotes.DD")) {
+            loadHelp(*path);
+        } else if (const auto path = findFromAncestors("assets/God/HSNotes.DD")) {
+            loadHelp(*path);
+        } else if (const auto path = findFromAncestors("TinkerOS/Adam/God/HSNotes.DD")) {
             loadHelp(*path);
         } else if (const auto path = findFromAncestors("TempleOS/Adam/God/HSNotes.DD")) {
             loadHelp(*path);
@@ -734,14 +756,7 @@ private:
 
     static std::optional<fs::path> findAfterEgyptDir()
     {
-        fs::path path = fs::current_path();
-        for (int i = 0; i < 10; ++i) {
-            const fs::path candidate = path / "TinkerOS" / "Apps" / "AfterEgypt";
-            if (fs::exists(candidate / "Camp.HC")) return candidate;
-            if (!path.has_parent_path() || path == path.parent_path()) break;
-            path = path.parent_path();
-        }
-        return std::nullopt;
+        return findAfterEgyptAssetsDir();
     }
 
     static uint32_t readU32(const std::vector<uint8_t> &bytes, size_t off)
@@ -1201,16 +1216,21 @@ public:
             std::cerr << "after-egypt-sdl3: Bible.TXT asset not found\n";
             return 2;
         }
+        const std::optional<fs::path> afterEgyptRoot = findAfterEgyptAssetsDir();
+        if (!afterEgyptRoot) {
+            std::cerr << "after-egypt-sdl3: AfterEgypt asset directory not found\n";
+            return 2;
+        }
         const std::array<fs::path, 5> required = {
-            "TinkerOS/Apps/AfterEgypt/Camp.HC",
-            "TinkerOS/Apps/AfterEgypt/WaterRock.HC",
-            "TinkerOS/Apps/AfterEgypt/Battle.HC",
-            "TinkerOS/Apps/AfterEgypt/Quail.HC",
-            "TinkerOS/Apps/AfterEgypt/HorebA.HC",
+            "Camp.HC",
+            "WaterRock.HC",
+            "Battle.HC",
+            "Quail.HC",
+            "HorebA.HC",
         };
         for (const auto &rel : required) {
-            if (!findFromAncestors(rel)) {
-                std::cerr << "after-egypt-sdl3: missing asset " << rel << '\n';
+            if (!fs::exists(*afterEgyptRoot / rel)) {
+                std::cerr << "after-egypt-sdl3: missing asset " << (*afterEgyptRoot / rel) << '\n';
                 return 2;
             }
         }

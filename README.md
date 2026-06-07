@@ -5,8 +5,8 @@ Native SDL3 port of TinkerOS `Apps/AfterEgypt`.
 The original is a small TempleOS-style app suite with embedded `.DD` sprite
 blobs. This port keeps the trailer, original camp-before-menu turn loop,
 music/sound, activity scenes, Bible/document screens, and runtime decoding of
-the embedded TempleOS sprite records from `TinkerOS/Apps/AfterEgypt`. SDL
-vector fallbacks are used when those source files are unavailable.
+the embedded TempleOS sprite records from the bundled `assets/AfterEgypt`
+files.
 
 ## Screenshots
 
@@ -70,9 +70,11 @@ interactive story scenes.
 
 ## Runtime Assets
 
-The port searches the adjacent checkout for `TinkerOS/Apps/AfterEgypt`,
-`TempleOS/Misc/Bible.TXT`, and the TinkerOS/TempleOS God vocabulary/help files.
-It does not copy those text assets into the SDL port.
+The port includes the original AfterEgypt scene/comic assets in
+`assets/AfterEgypt`, KJV Bible text in `assets/Bible.TXT`, and God/help text
+sources in `assets/God`. Those local copies are preferred at runtime. Adjacent
+TempleOS/TinkerOS checkout paths remain fallback search locations for
+development.
 
 ## Smoke Tests
 
