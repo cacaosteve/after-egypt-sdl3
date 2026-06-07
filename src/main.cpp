@@ -30,6 +30,15 @@ constexpr int kWindowW = 1180;
 constexpr int kWindowH = 760;
 constexpr SDL_WindowFlags kWindowFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_MAXIMIZED;
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kCampWidth = 600.0;
+constexpr double kCampScale = 300.0;
+constexpr double kCampZClip = 10.0;
+constexpr int kCloudsNum = 16;
+constexpr int kCloudPts = 512;
+constexpr int kCloudPens = 8;
+constexpr int kCloudPenPts = 16;
+constexpr int kCloudPenSize = 16;
+constexpr int kCloudSamples = 6;
 
 struct Color {
     uint8_t r;
@@ -336,12 +345,31 @@ struct CampObj {
     bool tent = false;
 };
 
+struct CampProjection {
+    bool visible = false;
+    float x = 0.0f;
+    float y = 0.0f;
+    float scale = 1.0f;
+    double depth = 0.0;
+};
+
+struct CloudPoint {
+    int x = 0;
+    int y = 0;
+    uint16_t shade = 0;
+};
+
 struct Cloud {
     double x = 0.0;
     double y = 0.0;
     double dx = 0.0;
-    double scale = 1.0;
-    uint32_t seed = 0;
+    double dy = 0.0;
+    uint16_t color = 0;
+    std::array<CloudPoint, kCloudPts> points;
+};
+
+struct CloudPen {
+    std::array<SDL_Point, kCloudPenPts> points;
 };
 
 struct Quail {
@@ -355,9 +383,14 @@ struct Quail {
 
 struct HorebObj {
     double x = 0.0;
+    double y = 0.0;
     double z = 0.0;
+    double dx = 0.0;
+    double dz = 0.0;
+    double phase = 0.0;
     int bi = 1;
     int seed = 0;
+    bool mirror = false;
 };
 
 struct HorebProjection {
@@ -453,15 +486,19 @@ public:
         return muted_;
     }
 
-    void cue(double hz, double seconds)
-    {
-        cueFreq_ = hz;
-        cueRemaining_ = std::max(cueRemaining_, seconds);
-    }
-
     void pump(Mode mode, double)
     {
         if (!stream_ || muted_) return;
+        if (!trackActive_ || mode != trackMode_) {
+            SDL_ClearAudioStream(stream_);
+            trackActive_ = true;
+            trackMode_ = mode;
+            noteIndex_ = 0;
+            noteRemaining_ = 0.0;
+            noteStarted_ = false;
+            melodyPhase_ = 0.0;
+        }
+
         const int queued = SDL_GetAudioStreamQueued(stream_);
         const int targetBytes = static_cast<int>(sampleRate_ * sizeof(float) * 0.12);
         if (queued >= targetBytes) return;
@@ -476,7 +513,11 @@ public:
         for (int i = 0; i < frames; ++i) {
             const double step = 1.0 / static_cast<double>(sampleRate_);
             if (noteRemaining_ <= 0.0) {
-                noteIndex_ = (noteIndex_ + 1) % melody.size();
+                if (noteStarted_) {
+                    noteIndex_ = (noteIndex_ + 1) % melody.size();
+                } else {
+                    noteStarted_ = true;
+                }
                 noteRemaining_ = melody[noteIndex_].seconds;
             }
             noteRemaining_ -= step;
@@ -484,17 +525,20 @@ public:
             melodyPhase_ = wrap(melodyPhase_ + hz * step, 0.0, 1.0);
             double sample = std::sin(melodyPhase_ * 2.0 * kPi) * 0.026;
 
-            if (cueRemaining_ > 0.0) {
-                cuePhase_ = wrap(cuePhase_ + cueFreq_ * step, 0.0, 1.0);
-                const double envelope = clamp(cueRemaining_ / 0.18, 0.0, 1.0);
-                sample += std::sin(cuePhase_ * 2.0 * kPi) * 0.11 * envelope;
-                cueRemaining_ = std::max(0.0, cueRemaining_ - step);
-            }
-
             samples_[static_cast<size_t>(i)] = static_cast<float>(clamp(sample, -0.25, 0.25));
         }
         SDL_PutAudioStreamData(stream_, samples_.data(),
                                static_cast<int>(samples_.size() * sizeof(float)));
+    }
+
+    void silence()
+    {
+        if (stream_) SDL_ClearAudioStream(stream_);
+        trackActive_ = false;
+        noteIndex_ = 0;
+        noteRemaining_ = 0.0;
+        noteStarted_ = false;
+        melodyPhase_ = 0.0;
     }
 
 private:
@@ -550,14 +594,6 @@ private:
         return notes;
     }
 
-    static std::vector<Tone> tones(std::initializer_list<double> hz)
-    {
-        std::vector<Tone> out;
-        out.reserve(hz.size());
-        for (double note : hz) out.push_back({note, 0.18});
-        return out;
-    }
-
     const std::vector<Tone> &melodyFor(Mode mode) const
     {
         static const std::vector<Tone> afterEgyptSong = parseTempleSong({
@@ -572,18 +608,8 @@ private:
             "5CGqD4eA5DsDCDCqGEetD4A5D4sG5D4G5D",
             "5eCGqD4eA5DsDCDCqGEetD4A5D4sG5D4G5D",
         });
-        static const std::vector<Tone> battle = tones({220.0, 246.94, 261.63, 293.66, 261.63, 246.94, 220.0, 196.0});
-        static const std::vector<Tone> water = tones({293.66, 369.99, 440.0, 587.33, 440.0, 369.99, 293.66, 246.94});
-        static const std::vector<Tone> quail = tones({392.0, 392.0, 440.0, 493.88, 523.25, 493.88, 440.0, 392.0});
-        static const std::vector<Tone> god = tones({261.63, 329.63, 392.0, 523.25, 392.0, 329.63, 293.66, 349.23});
-        switch (mode) {
-        case Mode::Clouds: return clouds;
-        case Mode::Battle: return battle;
-        case Mode::WaterRock: return water;
-        case Mode::Quail: return quail;
-        case Mode::God: return god;
-        default: return afterEgyptSong;
-        }
+        if (mode == Mode::Clouds) return clouds;
+        return afterEgyptSong;
     }
 
     SDL_AudioStream *stream_ = nullptr;
@@ -591,10 +617,10 @@ private:
     bool muted_ = false;
     size_t noteIndex_ = 0;
     double noteRemaining_ = 0.0;
+    bool noteStarted_ = false;
+    bool trackActive_ = false;
+    Mode trackMode_ = Mode::Camp;
     double melodyPhase_ = 0.0;
-    double cuePhase_ = 0.0;
-    double cueFreq_ = 440.0;
-    double cueRemaining_ = 0.0;
     std::vector<float> samples_;
 };
 
@@ -627,9 +653,9 @@ public:
         const std::optional<fs::path> root = findAfterEgyptDir();
         if (!root) return;
 
-        const std::array<std::string, 8> files = {
+        const std::array<std::string, 9> files = {
             "Camp.HC", "WaterRock.HC", "Battle.HC", "Quail.HC",
-            "Mountain.HC", "GodTalking.HC", "AfterEgypt.HC", "HorebA.HC",
+            "Mountain.HC", "Clouds.HC", "GodTalking.HC", "AfterEgypt.HC", "HorebA.HC",
         };
         for (const auto &file : files) loadDoc(*root / file, file);
         loadDoc(*root / "AESplash.DD", "AESplash.DD");
@@ -650,7 +676,8 @@ public:
         sprites_.clear();
     }
 
-    bool draw(const std::string &file, int bi, float x, float y, float scale = 1.0f) const
+    bool draw(const std::string &file, int bi, float x, float y, float scale = 1.0f,
+              uint8_t alpha = 255, bool flip = false) const
     {
         const auto it = sprites_.find(key(file, bi));
         if (it == sprites_.end() || !it->second.texture) return false;
@@ -661,7 +688,13 @@ public:
             sprite.width * scale,
             sprite.height * scale,
         };
-        SDL_RenderTexture(renderer_, sprite.texture, nullptr, &dst);
+        if (alpha != 255) SDL_SetTextureAlphaMod(sprite.texture, alpha);
+        if (flip) {
+            SDL_RenderTextureRotated(renderer_, sprite.texture, nullptr, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+        } else {
+            SDL_RenderTexture(renderer_, sprite.texture, nullptr, &dst);
+        }
+        if (alpha != 255) SDL_SetTextureAlphaMod(sprite.texture, 255);
         return true;
     }
 
@@ -1150,7 +1183,7 @@ public:
             handleEvents(running);
             if (quitRequested_) running = false;
             update(dt, t);
-            audio_.pump(showIntro_ ? Mode::Camp : mode_, dt);
+            pumpAudio(dt);
             render(t);
 
             if (maxFrames > 0 && ++frames >= maxFrames) {
@@ -1181,12 +1214,18 @@ public:
                 return 2;
             }
         }
+        for (const auto &file : comicFiles_) {
+            if (!sprites_.has(file, 1)) {
+                std::cerr << "after-egypt-sdl3: missing comic sprite " << file << '\n';
+                return 2;
+            }
+        }
 
         showIntro_ = false;
         const auto frame = [&] {
             const double t = nowSeconds();
             update(1.0 / 60.0, t);
-            audio_.pump(mode_, 1.0 / 60.0);
+            pumpAudio(1.0 / 60.0);
             render(t);
             SDL_Delay(5);
         };
@@ -1243,20 +1282,22 @@ private:
 
     std::vector<CampObj> camp_;
     std::vector<Cloud> clouds_;
+    std::array<CloudPen, kCloudPens> cloudPens_;
     std::vector<SDL_FPoint> mapPath_;
     std::vector<Quail> quail_;
     std::vector<HorebObj> horebObjs_;
     std::vector<std::string> comicFiles_;
     std::vector<std::string> godTextLines_;
     std::string courtPrompt_;
-    std::string courtResult_;
     bool showIntro_ = true;
     bool quitRequested_ = false;
     double introStart_ = 0.0;
     double sceneStart_ = 0.0;
     double campStart_ = 0.0;
+    double campStepAccum_ = 0.0;
     int campCalfCycle_ = -1;
     bool campShowCalf_ = false;
+    double cloudStepAccum_ = 0.0;
     double mountainStart_ = 0.0;
     GodStage godStage_ = GodStage::Climb;
     double godStageStart_ = 0.0;
@@ -1265,8 +1306,13 @@ private:
     double horebZ_ = 0.0;
     bool horebFound_ = false;
     double horebFoundTime_ = 0.0;
-    double mapAngle_ = 0.0;
+    double mapWorldX_ = 0.0;
+    double mapWorldY_ = 0.0;
+    double mapA1_ = 0.0;
+    double mapA2_ = 0.0;
+    double mapA2Total_ = 0.0;
     double mapStepDue_ = 0.0;
+    bool mapLastLeft_ = false;
     double waterDownTime_ = -1.0;
     double waterUpTime_ = -1.0;
     double waterAutoReleaseAt_ = -1.0;
@@ -1276,6 +1322,7 @@ private:
     double battleTT_ = 0.0;
     double battleShift_ = 0.0;
     bool battleHeld_ = false;
+    bool battleMouseHeld_ = false;
     bool quailReading_ = true;
     bool comicPicker_ = true;
     int docScroll_ = 0;
@@ -1318,73 +1365,113 @@ private:
     {
         ++day_;
         const double growth = 1.0 + 0.01 * static_cast<double>(irange(-30, 69));
-        people_ = static_cast<int>(clamp(std::round(people_ * growth), 100.0, 1024.0));
+        people_ = std::min(static_cast<int>(people_ * growth), 1024);
         initCamp();
         flow_ = Flow::CampWatch;
         mode_ = Mode::Camp;
         campStart_ = nowSeconds();
+        campStepAccum_ = 0.0;
         campCalfCycle_ = -1;
         campShowCalf_ = false;
         docScroll_ = 0;
-        audio_.cue(392.0, 0.10);
     }
 
     void initCamp()
     {
         camp_.clear();
-        const int tents = std::max(4, (people_ + 39) / 40);
+        const int tents = (people_ + 39) / 40;
         const int personCount = std::min(people_, 1024);
 
         for (int i = 0; i < personCount; ++i) {
             CampObj obj;
-            obj.x = range(-300.0, 300.0);
-            obj.z = range(-610.0, 0.0);
-            obj.dx = range(-16.0, 16.0);
-            obj.dz = range(-16.0, 16.0);
+            obj.x = range(-kCampWidth / 2.0, kCampWidth / 2.0);
+            obj.z = -range(0.0, kCampWidth);
             obj.tent = false;
             camp_.push_back(obj);
         }
 
         for (int i = 0; i < tents; ++i) {
             CampObj obj;
-            obj.x = range(-285.0, 285.0);
-            obj.z = range(-585.0, -30.0);
+            obj.x = range(-kCampWidth / 2.0, kCampWidth / 2.0);
+            obj.z = -range(0.0, kCampWidth);
             obj.tent = true;
             camp_.push_back(obj);
         }
     }
 
+    double cloudSkyHeight(int h) const
+    {
+        const double rowH = clamp(h / 36.0, 12.0, 16.0);
+        return std::min(h * 0.70, rowH * 30.0);
+    }
+
     void initClouds()
     {
         clouds_.clear();
-        for (int i = 0; i < 16; ++i) {
+        clouds_.reserve(kCloudsNum);
+        int w = 0;
+        int h = 0;
+        if (window_) SDL_GetWindowSize(window_, &w, &h);
+        if (w <= 0) w = kWindowW;
+        if (h <= 0) h = kWindowH;
+        const double skyH = cloudSkyHeight(h);
+        for (int i = 0; i < kCloudsNum; ++i) {
             Cloud cloud;
-            cloud.x = range(-80.0, 880.0);
-            cloud.y = range(50.0, 260.0);
-            cloud.dx = range(8.0, 36.0);
-            cloud.scale = range(0.65, 1.45);
-            cloud.seed = static_cast<uint32_t>(irange(1, 1000000));
+            cloud.x = range(w * 0.25, w * 0.75);
+            cloud.y = range(skyH * 0.25, skyH * 0.75);
+            cloud.dx = range(-25.0, 25.0);
+            cloud.dy = range(-25.0, 25.0);
+            cloud.color = static_cast<uint16_t>(irange(0, 65535));
+            for (CloudPoint &point : cloud.points) {
+                int sx = 0;
+                int sy = 0;
+                for (int j = 0; j < kCloudSamples; ++j) {
+                    sx += irange(-32768, 32767);
+                    sy += irange(-32768, 32767);
+                }
+                point.x = sx * 100 / 32767 / kCloudSamples;
+                point.y = sy * 50 / 32767 / kCloudSamples;
+                point.shade = static_cast<uint16_t>(irange(0, 65535));
+            }
             clouds_.push_back(cloud);
         }
+        for (CloudPen &pen : cloudPens_) {
+            for (SDL_Point &point : pen.points) {
+                point.x = irange(0, kCloudPenSize - 1);
+                point.y = irange(0, kCloudPenSize - 1);
+            }
+        }
+        cloudStepAccum_ = 0.0;
     }
 
     void initMap()
     {
         mapPath_.clear();
         mapPath_.push_back({0.0f, 0.0f});
-        mapAngle_ = -0.4;
+        mapWorldX_ = 0.0;
+        mapWorldY_ = 0.0;
+        mapA1_ = (0.05 + 0.02) / 2.0;
+        mapA2_ = (0.30 + 0.15) / 2.0;
+        mapA2Total_ = mapA2_;
+        mapLastLeft_ = false;
         mapStepDue_ = 0.0;
     }
 
     void initQuail()
     {
         quail_.clear();
+        int w = 0;
+        int h = 0;
+        if (window_) SDL_GetWindowSize(window_, &w, &h);
+        if (w <= 0) w = kWindowW;
+        if (h <= 0) h = kWindowH;
+        const double skyH = 0.6 * h;
         for (int i = 0; i < 128; ++i) {
             Quail q;
-            q.x = range(-60.0, 820.0);
-            q.y = range(34.0, 300.0);
-            q.dx = range(18.0, 70.0);
-            q.dy = range(-24.0, 24.0);
+            q.x = range(-0.2 * w, static_cast<double>(w));
+            q.y = range(0.0, skyH);
+            q.dx = range(10.0, 60.0);
+            q.dy = range(-10.0, 10.0);
             q.phase = range(0.0, 1.0);
             q.dead = false;
             quail_.push_back(q);
@@ -1394,24 +1481,46 @@ private:
     void initHoreb()
     {
         horebObjs_.clear();
+        horebObjs_.reserve(256 + 4096);
         horebAngle_ = 0.0;
         horebX_ = 0.0;
         horebZ_ = 0.0;
         horebFound_ = false;
         horebFoundTime_ = 0.0;
 
-        horebObjs_.push_back({640.0, 1820.0, 2, 0});
-        for (int i = 1; i < 180; ++i) {
-            const double lane = (random() < 0.5 ? -1.0 : 1.0) * range(170.0, 1850.0);
-            const double z = range(180.0, 3900.0);
-            int bi = 1;
-            const double r = random();
-            if (r < 0.34) bi = 1;
-            else if (r < 0.54) bi = 2;
-            else if (r < 0.72) bi = 3;
-            else if (r < 0.88) bi = 4;
-            else bi = irange(6, 8);
-            horebObjs_.push_back({lane, z, bi, i});
+        auto coord = [&] { return range(-4096.0, 4095.0); };
+        auto weightedType = [&] {
+            const std::array<std::pair<int, int>, 8> weights = {{
+                {1, 30}, {2, 30}, {3, 15}, {4, 30},
+                {5, 30}, {6, 1},  {7, 1},  {8, 1},
+            }};
+            int total = 0;
+            for (const auto &[_, weight] : weights) total += weight;
+            int pick = irange(0, total - 1);
+            for (const auto &[type, weight] : weights) {
+                pick -= weight;
+                if (pick < 0) return type;
+            }
+            return 1;
+        };
+        auto makeObj = [&](int type, int seed) {
+            HorebObj obj;
+            obj.x = coord();
+            obj.y = 0.0;
+            obj.z = coord();
+            obj.phase = 2.0 * kPi * random();
+            obj.bi = type;
+            obj.seed = seed;
+            obj.mirror = irange(0, 1) == 0;
+            return obj;
+        };
+
+        horebObjs_.push_back(makeObj(1, 0));
+        for (int i = 1; i < 256; ++i) {
+            horebObjs_.push_back(makeObj(weightedType(), i));
+        }
+        for (int i = 0; i < 4096; ++i) {
+            horebObjs_.push_back(makeObj(0, 10000 + i));
         }
     }
 
@@ -1453,7 +1562,6 @@ private:
         case Mode::Comics: comicIndex_ = 0; comicPicker_ = true; break;
         case Mode::Help: docScroll_ = 0; break;
         }
-        audio_.cue(523.25, 0.08);
     }
 
     void startScene(Mode mode)
@@ -1476,7 +1584,6 @@ private:
             comicPicker_ = true;
             comicIndex_ = 0;
         }
-        audio_.cue(440.0, 0.05);
     }
 
     void finishScene()
@@ -1508,6 +1615,7 @@ private:
         battleTT_ = 0.0;
         battleShift_ = 0.0;
         battleHeld_ = false;
+        battleMouseHeld_ = false;
     }
 
     void perform(Action action)
@@ -1536,22 +1644,25 @@ private:
             } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                 if (showIntro_) {
                     showIntro_ = false;
-                    audio_.cue(659.25, 0.10);
                     continue;
                 }
                 onMouseDown(event.button.x, event.button.y);
             } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                if (flow_ == Flow::Scene && mode_ == Mode::Battle) releaseBattle();
+                if (flow_ == Flow::Scene && mode_ == Mode::Battle) {
+                    battleMouseHeld_ = false;
+                    if (!spaceIsDown()) releaseBattle();
+                }
             } else if (event.type == SDL_EVENT_KEY_DOWN) {
                 if (showIntro_) {
-                    showIntro_ = false;
-                    audio_.cue(659.25, 0.10);
+                    if (!ignoresAnyKey(event.key.scancode, event.key.mod)) {
+                        showIntro_ = false;
+                    }
                     continue;
                 }
-                onKeyDown(event.key.key, event.key.scancode, event.key.repeat, running);
+                onKeyDown(event.key.key, event.key.scancode, event.key.mod, event.key.repeat, running);
             } else if (event.type == SDL_EVENT_KEY_UP) {
                 if (event.key.scancode == SDL_SCANCODE_SPACE) {
-                    if (flow_ == Flow::Scene && mode_ == Mode::Battle) releaseBattle();
+                    if (flow_ == Flow::Scene && mode_ == Mode::Battle && !battleMouseHeld_) releaseBattle();
                     if (flow_ == Flow::Scene && mode_ == Mode::WaterRock) releaseWaterStrike();
                 }
             } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -1583,9 +1694,8 @@ private:
 
         if (mode_ == Mode::WaterRock) {
             quickWaterStrike();
-        } else if (mode_ == Mode::God && godStage_ == GodStage::Horeb) {
-            audio_.cue(293.66, 0.04);
         } else if (mode_ == Mode::Battle) {
+            battleMouseHeld_ = true;
             holdBattle();
         } else if (mode_ == Mode::Court) {
             const int choice = courtChoiceAt(x, y, w, h);
@@ -1596,7 +1706,6 @@ private:
                 if (choice >= 0) {
                     comicIndex_ = choice;
                     comicPicker_ = false;
-                    audio_.cue(440.0, 0.05);
                 }
             } else {
                 comicPicker_ = true;
@@ -1615,20 +1724,22 @@ private:
         docScroll_ = std::max(0, docScroll_ - static_cast<int>(std::lround(y * 54.0f)));
     }
 
-    void onKeyDown(SDL_Keycode key, SDL_Scancode scancode, bool repeat, bool &running)
+    void onKeyDown(SDL_Keycode key, SDL_Scancode scancode, SDL_Keymod mod, bool repeat, bool &running)
     {
         (void)running;
+        const bool ignoreAnyKey = ignoresAnyKey(scancode, mod);
         if (key == SDLK_M) {
             audio_.toggleMuted();
             return;
         }
 
         if (flow_ == Flow::CampWatch) {
-            openMenu();
+            if (!ignoreAnyKey) openMenu();
             return;
         }
 
         if (flow_ == Flow::Menu) {
+            if (ignoreAnyKey) return;
             if (key == SDLK_ESCAPE) {
                 flow_ = Flow::CampWatch;
                 return;
@@ -1668,7 +1779,6 @@ private:
         if (key == SDLK_RETURN && mode_ == Mode::God && godStage_ == GodStage::Horeb) {
             initHoreb();
             godStageStart_ = nowSeconds();
-            audio_.cue(523.25, 0.08);
             return;
         }
 
@@ -1688,10 +1798,14 @@ private:
         if (key == SDLK_SPACE) {
             if (mode_ == Mode::WaterRock && !repeat) beginWaterStrike();
             else if (mode_ == Mode::Battle) holdBattle();
-            else if (mode_ == Mode::Map || mode_ == Mode::Clouds ||
-                     (mode_ == Mode::Quail && !quailReading_)) finishScene();
+            else if (!ignoreAnyKey && (mode_ == Mode::Map || mode_ == Mode::Clouds ||
+                                       (mode_ == Mode::Quail && !quailReading_))) {
+                finishScene();
+            }
             return;
         }
+
+        if (ignoreAnyKey) return;
 
         if (mode_ == Mode::Court) {
             if (key == SDLK_1) judge(0);
@@ -1723,69 +1837,107 @@ private:
         }
         if (flow_ == Flow::CampWatch) updateCamp(dt, t);
         if (flow_ != Flow::Scene) return;
-        updateGod(t);
+        updateGod(dt, t);
         if (mode_ == Mode::Clouds) updateClouds(dt);
         if (mode_ == Mode::Map) updateMap(dt, t);
         if (mode_ == Mode::Battle) updateBattle(dt, t);
         if (mode_ == Mode::Quail && !quailReading_) updateQuail(dt, t);
     }
 
-    void updateGod(double t)
+    void pumpAudio(double dt)
+    {
+        if (showIntro_ || flow_ == Flow::CampWatch) {
+            audio_.pump(Mode::Camp, dt);
+        } else if (flow_ == Flow::Scene && mode_ == Mode::Clouds) {
+            audio_.pump(Mode::Clouds, dt);
+        } else {
+            audio_.silence();
+        }
+    }
+
+    void updateGod(double dt, double t)
     {
         if (mode_ != Mode::God) return;
         if (godStage_ == GodStage::Climb && t - mountainStart_ >= 7.5) {
             godStage_ = GodStage::Horeb;
             godStageStart_ = t;
-            audio_.cue(523.25, 0.14);
         }
-        if (godStage_ == GodStage::Horeb && horebFound_ && t - horebFoundTime_ >= 0.85) {
+        if (godStage_ == GodStage::Horeb) updateHorebAnimals(dt, t);
+        if (godStage_ == GodStage::Horeb && horebFound_ && t - horebFoundTime_ >= 0.20) {
             advanceGodStage();
+        }
+    }
+
+    void updateHorebAnimals(double dt, double t)
+    {
+        for (HorebObj &obj : horebObjs_) {
+            if (obj.bi == 6 || obj.bi == 7 || obj.bi == 8) {
+                obj.x += obj.dx * dt;
+                obj.z += obj.dz * dt;
+                obj.dx = 250.0 * std::cos(0.5 * t + obj.phase);
+                obj.dz = 250.0 * std::sin(0.5 * t + obj.phase);
+                const double screenDx = obj.dx * std::cos(horebAngle_) - obj.dz * std::sin(horebAngle_);
+                obj.mirror = screenDx < 0.0;
+            }
         }
     }
 
     void updateCamp(double dt, double t)
     {
-        const double localT = t - campStart_;
-        const bool gather = std::fmod(localT, 10.0) >= 5.0;
-        const int cycle = static_cast<int>(std::floor(localT / 10.0));
-        if (cycle != campCalfCycle_) {
-            campCalfCycle_ = cycle;
-            campShowCalf_ = random() < 0.5;
-        }
-        const double speedMax = 72.0;
-        const int personTotal = std::max(1, static_cast<int>(std::count_if(camp_.begin(), camp_.end(),
-                                                                           [](const CampObj &obj) {
-                                                                               return !obj.tent;
-                                                                           })));
-        int i = 0;
-        for (auto &obj : camp_) {
-            if (obj.tent) continue;
-            if (gather) {
-                const double a = (static_cast<double>(i) / personTotal) * 2.0 * kPi;
-                const double tx = 150.0 * std::cos(a);
-                const double tz = -310.0 + 150.0 * std::sin(a);
-                const double dx = tx - obj.x;
-                const double dz = tz - obj.z;
-                const double len = std::sqrt(dx * dx + dz * dz) + 0.001;
-                obj.dx += (dx / len) * 120.0 * dt;
-                obj.dz += (dz / len) * 120.0 * dt;
-            } else {
-                obj.dx += range(-70.0, 70.0) * dt;
-                obj.dz += range(-70.0, 70.0) * dt;
+        constexpr double step = 0.020;
+        campStepAccum_ = std::min(campStepAccum_ + dt, step * 8.0);
+        while (campStepAccum_ >= step) {
+            const double localT = t - campStart_ - campStepAccum_;
+            const bool gather = std::fmod(localT, 10.0) >= 5.0;
+            const int cycle = static_cast<int>(std::floor(localT / 10.0));
+            if (cycle != campCalfCycle_) {
+                campCalfCycle_ = cycle;
+                campShowCalf_ = gather && random() < 0.5;
             }
-            obj.dx = clamp(obj.dx, -speedMax, speedMax);
-            obj.dz = clamp(obj.dz, -speedMax, speedMax);
-            obj.x += obj.dx * dt;
-            obj.z += obj.dz * dt;
-            if (obj.x < -320.0 || obj.x > 320.0) {
-                obj.x = clamp(obj.x, -320.0, 320.0);
-                obj.dx = -obj.dx;
+
+            constexpr double speedMax = 2.0;
+            const int numObjs = std::max(1, static_cast<int>(camp_.size()));
+            for (size_t i = 0; i < camp_.size(); ++i) {
+                CampObj &obj = camp_[i];
+                if (obj.tent) continue;
+                if (gather) {
+                    const double a = (1.0 + 1.0 / 40.0) * static_cast<double>(i) *
+                                     2.0 * kPi / static_cast<double>(numObjs);
+                    const double tx = kCampWidth / 4.0 * std::cos(a);
+                    const double tz = kCampWidth / 4.0 * std::sin(a) - kCampWidth / 2.0;
+                    const double dx = tx - obj.x;
+                    const double dz = tz - obj.z;
+                    const double len = std::sqrt(dx * dx + dz * dz);
+                    if (len > 0.001) {
+                        obj.dx = speedMax * dx / len;
+                        obj.dz = speedMax * dz / len;
+                    }
+                } else {
+                    obj.dx += range(-0.5, 0.5);
+                    obj.dz += range(-0.5, 0.5);
+                }
+                obj.dx = clamp(obj.dx, -speedMax, speedMax);
+                obj.dz = clamp(obj.dz, -speedMax, speedMax);
+                obj.x += obj.dx;
+                obj.z += obj.dz;
+                if (obj.x < -kCampWidth / 2.0) {
+                    obj.x = -kCampWidth / 2.0;
+                    obj.dx = -obj.dx;
+                }
+                if (obj.x > kCampWidth / 2.0) {
+                    obj.x = kCampWidth / 2.0;
+                    obj.dx = -obj.dx;
+                }
+                if (obj.z < -kCampWidth) {
+                    obj.z = -kCampWidth;
+                    obj.dz = -obj.dz;
+                }
+                if (obj.z > 0.0) {
+                    obj.z = 0.0;
+                    obj.dz = -obj.dz;
+                }
             }
-            if (obj.z < -620.0 || obj.z > 0.0) {
-                obj.z = clamp(obj.z, -620.0, 0.0);
-                obj.dz = -obj.dz;
-            }
-            ++i;
+            campStepAccum_ -= step;
         }
     }
 
@@ -1794,13 +1946,33 @@ private:
         int w = 0;
         int h = 0;
         SDL_GetWindowSize(window_, &w, &h);
-        for (auto &cloud : clouds_) {
-            cloud.x += cloud.dx * dt;
-            if (cloud.x > w + 120.0) {
-                cloud.x = -140.0;
-                cloud.y = range(40.0, std::max(80.0, h * 0.38));
+        const double skyH = cloudSkyHeight(h);
+        constexpr double step = 0.020;
+        cloudStepAccum_ = std::min(cloudStepAccum_ + dt, step * 8.0);
+        auto sign = [](int v) { return (v > 0) - (v < 0); };
+        while (cloudStepAccum_ >= step) {
+            for (CloudPen &pen : cloudPens_) {
+                for (SDL_Point &point : pen.points) {
+                    point.x = static_cast<int>(clamp(point.x + irange(-1, 1), 0, kCloudPenSize - 1));
+                    point.y = static_cast<int>(clamp(point.y + irange(-1, 1), 0, kCloudPenSize - 1));
+                }
             }
+            for (Cloud &cloud : clouds_) {
+                cloud.x += cloud.dx * step;
+                cloud.y = clamp(cloud.y + cloud.dy * step, 0.0, 0.7 * skyH);
+                cloud.color = static_cast<uint16_t>(clamp(65535.0 * cloud.y / (0.8 * skyH), 0.0, 65535.0));
+                for (CloudPoint &point : cloud.points) {
+                    int k = irange(-16, 15);
+                    if (k == -16) k = -point.x;
+                    point.x += sign(k);
+                    k = irange(-16, 15);
+                    if (k == -16) k = -point.y;
+                    point.y += sign(k);
+                }
+            }
+            cloudStepAccum_ -= step;
         }
+        (void)w;
     }
 
     void updateMap(double dt, double t)
@@ -1809,33 +1981,80 @@ private:
         int h = 0;
         SDL_GetWindowSize(window_, &w, &h);
         if (t < mapStepDue_) return;
-        mapStepDue_ = t + 0.025;
+        mapStepDue_ = t + 0.015;
 
-        SDL_FPoint p = mapPath_.back();
-        mapAngle_ += range(-0.17, 0.17);
-        mapAngle_ = wrap(mapAngle_, -kPi, kPi);
-        p.x += static_cast<float>(5.5 * std::cos(mapAngle_));
-        p.y += static_cast<float>(5.5 * std::sin(mapAngle_));
-        p.x = static_cast<float>(clamp(p.x, -w * 0.43, w * 0.43));
-        p.y = static_cast<float>(clamp(p.y, -h * 0.34, h * 0.34));
+        constexpr double ae1Min = 0.02;
+        constexpr double ae1Max = 0.05;
+        constexpr double ae2Min = 0.15;
+        constexpr double ae2Max = 0.30;
+        auto boundedAngle = [&](double current, double min, double max) {
+            double a = wrap(current + (max + min) / 5.0 * (random() - 0.5), -max, max);
+            a = clamp(a, -max, max);
+            if (a >= 0.0 && a <= min) return min;
+            if (a <= 0.0 && a >= -min) return -min;
+            return a;
+        };
+
+        mapA1_ = boundedAngle(mapA1_, ae1Min, ae1Max);
+        const double rx = mapWorldX_ * std::cos(mapA1_) - mapWorldY_ * std::sin(mapA1_);
+        const double ry = mapWorldX_ * std::sin(mapA1_) + mapWorldY_ * std::cos(mapA1_);
+        mapWorldX_ = rx;
+        mapWorldY_ = ry;
+
+        mapA2_ = boundedAngle(mapA2_, ae2Min, ae2Max);
+        mapA2Total_ += mapA2_;
+
+        const double cx = w * 0.5;
+        const double cy = h * 0.5;
+        const double cMin = std::max(1.0, std::min(cx, cy));
+        mapWorldX_ = clamp(mapWorldX_ + 6.0 * std::cos(mapA2Total_), -cMin + 10.0, cMin - 10.0);
+        mapWorldY_ = clamp(mapWorldY_ + 6.0 * std::sin(mapA2Total_), -cMin + 10.0, cMin - 10.0);
+
+        SDL_FPoint last = mapPath_.empty() ? SDL_FPoint{0.0f, 0.0f} : mapPath_.back();
+        SDL_FPoint p{
+            static_cast<float>((cx / cMin) * mapWorldX_),
+            static_cast<float>((cy / cMin) * mapWorldY_),
+        };
+        if (p.x < last.x) mapLastLeft_ = true;
+        else if (p.x > last.x) mapLastLeft_ = false;
         mapPath_.push_back(p);
-        if (mapPath_.size() > 1200) {
-            mapPath_.erase(mapPath_.begin(), mapPath_.begin() + 60);
+        if (mapPath_.size() > 6000) {
+            mapPath_.erase(mapPath_.begin(), mapPath_.begin() + 300);
         }
         (void)dt;
     }
 
     void updateBattle(double dt, double t)
     {
+        const bool spaceDown = spaceIsDown();
+        if (spaceDown && !battleHeld_) {
+            holdBattle();
+        } else if (!spaceDown && !battleMouseHeld_ && battleHeld_) {
+            releaseBattle(t);
+        }
+
         if (battleHeld_) {
             battleTT_ = 0.0;
             battleT0_ = t;
         } else {
             battleTT_ = clamp(std::pow((t - battleT0_) / 2.0, 4.0), 0.0, 1.0);
         }
-        const double direction = battleTT_ < 0.5 ? -1.0 : 1.0;
-        battleShift_ += direction * 50.0 * dt;
+        if (battleLast_ > 0.0) {
+            const double elapsed = t - battleLast_;
+            const double direction = battleTT_ < 0.5 ? -1.0 : 1.0;
+            battleShift_ += direction * 50.0 * elapsed;
+        }
+        (void)dt;
         battleLast_ = t;
+    }
+
+    double battleHack(double t, double phase) const
+    {
+        constexpr double hackPeriod = 0.25;
+        double tt = std::fmod(t + phase * hackPeriod, hackPeriod) / hackPeriod;
+        tt *= 2.0;
+        if (tt > 1.0) tt = 2.0 - tt;
+        return tt;
     }
 
     void updateQuail(double dt, double t)
@@ -1843,29 +2062,32 @@ private:
         int w = 0;
         int h = 0;
         SDL_GetWindowSize(window_, &w, &h);
-        const double skyH = h * 0.58;
+        const double skyH = h * 0.60;
         for (auto &q : quail_) {
             if (q.dead) {
-                q.x += q.dx * 0.15 * dt;
-                q.y += 135.0 * dt;
-                if (q.y > skyH + 18.0) {
-                    q.y = skyH + 18.0;
+                q.x += q.dx * dt;
+                q.y += 50.0 * dt;
+                if (q.y > skyH) {
+                    q.y = skyH;
                     q.dx = 0.0;
                 }
             } else {
                 q.x += q.dx * dt;
                 q.y += q.dy * dt;
-                if (q.y < 30.0 || q.y > skyH - 26.0) q.dy = -q.dy;
-                if (q.x > w + 80.0) q.x = -70.0;
-                if (random() < dt * 0.13 && t > 1.0) q.dead = true;
+                if (!(0.0 < q.y && q.y < skyH - 20.0)) {
+                    q.dy = -q.dy;
+                    q.y += q.dy * dt;
+                }
+                if (q.x > 0.0 && random() < dt / 10.0) q.dead = true;
             }
         }
+        (void)t;
+        (void)w;
     }
 
     void openMenu()
     {
         flow_ = Flow::Menu;
-        audio_.cue(523.25, 0.05);
     }
 
     int menuShortcutIndex(SDL_Keycode key) const
@@ -1873,6 +2095,35 @@ private:
         if (key >= SDLK_1 && key <= SDLK_9) return static_cast<int>(key - SDLK_1);
         if (key == SDLK_0) return 9;
         return -1;
+    }
+
+    bool isModifierKey(SDL_Scancode scancode) const
+    {
+        switch (scancode) {
+        case SDL_SCANCODE_LSHIFT:
+        case SDL_SCANCODE_RSHIFT:
+        case SDL_SCANCODE_LCTRL:
+        case SDL_SCANCODE_RCTRL:
+        case SDL_SCANCODE_LALT:
+        case SDL_SCANCODE_RALT:
+        case SDL_SCANCODE_LGUI:
+        case SDL_SCANCODE_RGUI:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool hasPrimaryModifier(SDL_Keymod mod) const
+    {
+        constexpr SDL_Keymod primaryMods =
+            SDL_KMOD_SHIFT | SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI;
+        return (mod & primaryMods) != 0;
+    }
+
+    bool ignoresAnyKey(SDL_Scancode scancode, SDL_Keymod mod) const
+    {
+        return isModifierKey(scancode) || hasPrimaryModifier(mod);
     }
 
     bool handleDocKey(SDL_Scancode scancode)
@@ -1902,7 +2153,6 @@ private:
         waterDownTime_ = nowSeconds();
         waterDownStroke_ = true;
         waterAutoReleaseAt_ = -1.0;
-        audio_.cue(146.83, 0.16);
     }
 
     void releaseWaterStrike()
@@ -1920,16 +2170,22 @@ private:
 
     void holdBattle()
     {
-        if (!battleHeld_) audio_.cue(196.0, 0.08);
         battleHeld_ = true;
     }
 
-    void releaseBattle()
+    void releaseBattle(double t = -1.0)
     {
         if (battleHeld_) {
             battleHeld_ = false;
-            battleT0_ = nowSeconds();
+            battleT0_ = t >= 0.0 ? t : nowSeconds();
         }
+    }
+
+    bool spaceIsDown() const
+    {
+        int count = 0;
+        const bool *keys = SDL_GetKeyboardState(&count);
+        return keys && SDL_SCANCODE_SPACE < count && keys[SDL_SCANCODE_SPACE];
     }
 
     void beginQuailAnimation()
@@ -1938,27 +2194,23 @@ private:
         sceneStart_ = nowSeconds();
         docScroll_ = 0;
         initQuail();
-        audio_.cue(523.25, 0.08);
     }
 
     void moveHoreb(SDL_Scancode scancode)
     {
-        constexpr double turn = 0.12;
-        constexpr double stride = 58.0;
+        constexpr double turn = kPi / 100.0;
+        constexpr double stride = 40.0;
         if (scancode == SDL_SCANCODE_LEFT) horebAngle_ -= turn;
         if (scancode == SDL_SCANCODE_RIGHT) horebAngle_ += turn;
         if (scancode == SDL_SCANCODE_UP) {
-            horebX_ += std::sin(horebAngle_) * stride;
-            horebZ_ += std::cos(horebAngle_) * stride;
-        }
-        if (scancode == SDL_SCANCODE_DOWN) {
             horebX_ -= std::sin(horebAngle_) * stride;
             horebZ_ -= std::cos(horebAngle_) * stride;
         }
+        if (scancode == SDL_SCANCODE_DOWN) {
+            horebX_ += std::sin(horebAngle_) * stride;
+            horebZ_ += std::cos(horebAngle_) * stride;
+        }
         horebAngle_ = wrap(horebAngle_, -kPi, kPi);
-        horebX_ = clamp(horebX_, -2400.0, 2400.0);
-        horebZ_ = clamp(horebZ_, -400.0, 4300.0);
-        audio_.cue(scancode == SDL_SCANCODE_UP ? 349.23 : 293.66, 0.05);
     }
 
     void advanceGodStage()
@@ -1971,20 +2223,17 @@ private:
             godTextLines_ = textAssets_.randomGodText(rng_);
         }
         godStageStart_ = nowSeconds();
-        audio_.cue(587.33, 0.12);
     }
 
     void nextComic()
     {
         comicIndex_ = (comicIndex_ + 1) % static_cast<int>(comicFiles_.size());
-        audio_.cue(440.0, 0.04);
     }
 
     void previousComic()
     {
         comicIndex_ = (comicIndex_ + static_cast<int>(comicFiles_.size()) - 1) %
                       static_cast<int>(comicFiles_.size());
-        audio_.cue(392.0, 0.04);
     }
 
     void generateCourt()
@@ -1999,20 +2248,12 @@ private:
         courtPrompt_ = accused[a] + " " + crimes[c];
         if (c <= 1) courtPrompt_ += " " + victims[irange(0, 3)];
         courtPrompt_ += (irange(0, 4) == 0) ? ", again!" : ".";
-        courtResult_.clear();
     }
 
     void judge(int choice)
     {
-        static const std::array<std::string, 3> result = {
-            "Mercy given. The camp keeps talking about it.",
-            "Punishment ordered. The elders nod and write it down.",
-            "A severe punishment. The desert gets quiet.",
-        };
-        courtResult_ = result[static_cast<size_t>(choice)];
-        generateCourt();
-        courtResult_ = result[static_cast<size_t>(choice)];
-        audio_.cue(261.63 + choice * 65.41, 0.08);
+        (void)choice;
+        finishScene();
     }
 
     void render(double t)
@@ -2143,57 +2384,128 @@ private:
         text(smallFont_, footer, 28.0f, static_cast<float>(h - 29), kBlue);
     }
 
+    CampProjection projectCamp(double x, double z, int contentW, int h, double localT) const
+    {
+        constexpr double pitch = 23.0 * kPi / 180.0;
+        const double screenScale = clamp(std::min(contentW / 640.0, h / 480.0), 0.92, 2.2);
+        const double campScale = kCampScale * screenScale;
+        const double viewY = 200.0 - 100.0 * std::sin(localT);
+        const double viewZ = 225.0 + 100.0 * std::cos(localT);
+
+        double tx = x;
+        const double ty = -viewY;
+        const double tz = z - viewZ;
+        const double ry = ty * std::cos(pitch) - tz * std::sin(pitch);
+        const double rz = ty * std::sin(pitch) + tz * std::cos(pitch);
+        if (rz >= -kCampZClip) return {};
+
+        const double perspective = -campScale / rz;
+        CampProjection p;
+        p.visible = true;
+        p.x = static_cast<float>(contentW * 0.5 + tx * perspective);
+        p.y = static_cast<float>(h * 0.5 - ry * perspective);
+        p.scale = static_cast<float>(0.5 * campScale / -rz);
+        p.depth = -rz;
+        return p;
+    }
+
+    void campLine(double x1, double z1, double x2, double z2, int contentW, int h, double localT,
+                  Color color)
+    {
+        const CampProjection a = projectCamp(x1, z1, contentW, h, localT);
+        const CampProjection b = projectCamp(x2, z2, contentW, h, localT);
+        if (!a.visible || !b.visible) return;
+        thickLine(a.x, a.y, b.x, b.y, 2.0f, color);
+    }
+
     void drawCamp(int contentW, int h, double t)
     {
         const double localT = t - campStart_;
-        const double viewY = 200.0 - 100.0 * std::sin(localT);
-        const double viewZ = 225.0 + 100.0 * std::cos(localT);
-        sceneBackdrop(contentW, h);
-        fill({0, h * 0.72f, static_cast<float>(contentW), h * 0.28f}, {187, 130, 67});
+        fill({0, 0, static_cast<float>(contentW), static_cast<float>(h)}, kYellow);
 
-        std::vector<const CampObj *> drawList;
+        const CampProjection mountain = projectCamp(0.0, -16.0 * kCampWidth, contentW, h, localT);
+        if (mountain.visible) {
+            const float mountainScale = static_cast<float>(std::max(0.8, std::min(contentW / 640.0, 2.6)));
+            if (!sprites_.draw("Camp.HC", 9, 0.0f, mountain.y, mountainScale) &&
+                !sprites_.draw("Mountain.HC", 1, 0.0f, mountain.y, mountainScale)) {
+                triangle({{0.0f, mountain.y + 58.0f * mountainScale},
+                          {contentW * 0.32f, mountain.y - 128.0f * mountainScale},
+                          {contentW * 0.62f, mountain.y + 58.0f * mountainScale}},
+                         {118, 97, 87});
+                triangle({{contentW * 0.24f, mountain.y + 58.0f * mountainScale},
+                          {contentW * 0.56f, mountain.y - 144.0f * mountainScale},
+                          {static_cast<float>(contentW), mountain.y + 58.0f * mountainScale}},
+                         {137, 112, 91});
+            }
+        }
+
+        campLine(-kCampWidth / 2.0, 0.0, kCampWidth / 2.0, 0.0, contentW, h, localT, {205, 205, 190});
+        campLine(-kCampWidth / 2.0, -kCampWidth, kCampWidth / 2.0, -kCampWidth, contentW, h, localT,
+                 {205, 205, 190});
+        campLine(-kCampWidth / 2.0, 0.0, -kCampWidth / 2.0, -kCampWidth, contentW, h, localT,
+                 {205, 205, 190});
+        campLine(kCampWidth / 2.0, 0.0, kCampWidth / 2.0, -kCampWidth, contentW, h, localT,
+                 {205, 205, 190});
+
+        struct CampDrawItem {
+            const CampObj *obj = nullptr;
+            CampProjection p;
+            size_t index = 0;
+        };
+        std::vector<CampDrawItem> drawList;
         drawList.reserve(camp_.size());
-        for (const auto &obj : camp_) drawList.push_back(&obj);
-        std::sort(drawList.begin(), drawList.end(), [](const CampObj *a, const CampObj *b) {
-            return a->z < b->z;
+        for (size_t i = 0; i < camp_.size(); ++i) {
+            const CampObj &obj = camp_[i];
+            CampProjection p = projectCamp(obj.x, obj.z, contentW, h, localT);
+            if (p.visible) drawList.push_back({&obj, p, i});
+        }
+        std::sort(drawList.begin(), drawList.end(), [](const CampDrawItem &a, const CampDrawItem &b) {
+            return a.p.depth > b.p.depth;
         });
 
-        int spriteFrame = 0;
-        for (const CampObj *obj : drawList) {
-            const double depth = (obj->z + 620.0) / 620.0;
-            const double sx = contentW * 0.5 + obj->x * (0.46 + 0.32 * depth) -
-                              (viewY - 200.0) * 0.18;
-            const double sy = h * 0.75 + obj->z * 0.39 + (viewZ - 225.0) * (0.12 + depth * 0.13);
-            const double scale = 0.45 + 0.9 * depth;
-            if (obj->tent) {
-                if (!sprites_.draw("Camp.HC", 7, static_cast<float>(sx), static_cast<float>(sy),
-                                   static_cast<float>(scale * 0.36))) {
-                    drawTent(sx, sy, scale);
+        if (campShowCalf_ && std::fmod(localT, 10.0) >= 5.0) {
+            const CampProjection calf = projectCamp(0.0, -kCampWidth / 2.0, contentW, h, localT);
+            if (calf.visible) {
+                const float calfScale = std::max(0.22f, calf.scale);
+                if (!sprites_.draw("Camp.HC", 8, calf.x, calf.y, calfScale)) {
+                    drawCalf(calf.x, calf.y);
+                }
+            }
+        }
+
+        const double frame = 4.0 * std::fmod(t, 0.5) / 0.5;
+        const int frameBase = static_cast<int>(std::floor(frame));
+        const double frameFrac = frame - frameBase;
+        for (const CampDrawItem &item : drawList) {
+            const CampObj &obj = *item.obj;
+            const float scale = std::max(0.18f, item.p.scale);
+            if (obj.tent) {
+                if (!sprites_.draw("Camp.HC", 7, item.p.x, item.p.y, scale)) {
+                    drawTent(item.p.x, item.p.y, scale * 1.8f);
                 }
             } else {
                 const std::array<int, 4> right = {2, 1, 3, 1};
                 const std::array<int, 4> left = {5, 4, 6, 4};
-                const int frame = (static_cast<int>(std::floor(t * 6.0)) + spriteFrame++) & 3;
-                const int bi = obj->dx < 0.0 ? left[frame] : right[frame];
-                if (!sprites_.draw("Camp.HC", bi, static_cast<float>(sx), static_cast<float>(sy),
-                                   static_cast<float>(scale * 0.58))) {
-                    drawPerson(sx, sy, scale, obj->dx < 0.0, {82, 48, 164});
+                const auto &frames = obj.dx < 0.0 ? left : right;
+                const int idx0 = (static_cast<int>(item.index) + frameBase) & 3;
+                const int idx1 = (static_cast<int>(item.index) + frameBase + 1) & 3;
+                bool drew = false;
+                if (frameFrac > 0.02) {
+                    const uint8_t alpha1 = static_cast<uint8_t>(clamp((1.0 - frameFrac) * 255.0, 0.0, 255.0));
+                    const uint8_t alpha2 = static_cast<uint8_t>(clamp(frameFrac * 255.0, 0.0, 255.0));
+                    drew = sprites_.draw("Camp.HC", frames[idx0], item.p.x, item.p.y, scale, alpha1);
+                    drew = sprites_.draw("Camp.HC", frames[idx1], item.p.x, item.p.y, scale, alpha2) || drew;
+                } else {
+                    drew = sprites_.draw("Camp.HC", frames[idx0], item.p.x, item.p.y, scale);
+                }
+                if (!drew) {
+                    drawPerson(item.p.x, item.p.y, scale * 1.8f, obj.dx < 0.0, {82, 48, 164});
                 }
             }
         }
 
         if (campShowCalf_ && std::fmod(localT, 10.0) >= 5.0 && std::fmod(t, 0.7) < 0.46) {
-            if (!sprites_.draw("Camp.HC", 8, contentW * 0.5f, h * 0.53f, 1.8f)) {
-                drawCalf(contentW * 0.5, h * 0.53);
-            }
-            text(font_, "!! Golden Calf !!", contentW * 0.5f - 72.0f, h * 0.44f, kRed);
-        }
-
-        text(titleFont_, "AfterEgypt", 26.0f, 22.0f, kYellow);
-        text(font_, "Day " + std::to_string(day_) + "   People " + std::to_string(people_),
-             30.0f, 62.0f, kWhite);
-        if (std::fmod(t, 1.0) < 0.62) {
-            text(font_, "Press any key or click.", 30.0f, h - 42.0f, kInk);
+            text(font_, "!!Golden Calf!!", contentW * 0.5f - 76.0f, h * 0.5f - 48.0f, kRed);
         }
     }
 
@@ -2229,96 +2541,128 @@ private:
 
     void drawGodTalking(int contentW, int h, double t)
     {
-        fill({0, 0, static_cast<float>(contentW), static_cast<float>(h)}, {118, 218, 230});
-        fill({0, h * 0.16f, static_cast<float>(contentW), h * 0.84f}, {234, 206, 73});
+        const float scale = static_cast<float>(clamp(std::min(contentW / 640.0, h / 480.0), 0.85, 1.25));
+        const float rowH = 16.0f * scale;
+        const float cyanH = 10.0f * rowH;
+        const float mountainY = 20.0f * rowH;
+        const float textY = 22.0f * rowH;
 
-        const float backdropScale = static_cast<float>(contentW) / 640.0f;
-        if (!sprites_.draw("GodTalking.HC", 4, 0.0f, h * 0.55f, backdropScale) &&
-            !sprites_.draw("Mountain.HC", 1, 0.0f, h * 0.58f, backdropScale)) {
-            triangle({{0.0f, h * 0.58f}, {contentW * 0.28f, h * 0.24f}, {contentW * 0.58f, h * 0.58f}},
+        fill({0, 0, static_cast<float>(contentW), cyanH}, {118, 218, 230});
+        fill({0, cyanH, static_cast<float>(contentW), static_cast<float>(h) - cyanH}, kYellow);
+
+        const float backdropScale = std::max(scale, static_cast<float>(contentW) / 640.0f);
+        if (!sprites_.draw("GodTalking.HC", 4, 0.0f, mountainY, backdropScale) &&
+            !sprites_.draw("Mountain.HC", 1, 0.0f, mountainY, backdropScale)) {
+            triangle({{0.0f, mountainY + 48.0f * scale},
+                      {contentW * 0.28f, mountainY - 116.0f * scale},
+                      {contentW * 0.58f, mountainY + 48.0f * scale}},
                      {112, 92, 82});
-            triangle({{contentW * 0.24f, h * 0.58f}, {contentW * 0.57f, h * 0.2f},
-                      {static_cast<float>(contentW), h * 0.58f}},
+            triangle({{contentW * 0.24f, mountainY + 48.0f * scale},
+                      {contentW * 0.57f, mountainY - 136.0f * scale},
+                      {static_cast<float>(contentW), mountainY + 48.0f * scale}},
                      {134, 106, 82});
         }
 
-        const float s = std::min(contentW / 640.0f, h / 480.0f) * 1.45f;
-        const float ox = contentW * 0.5f - 320.0f * s;
-        const float oy = h * 0.52f - 240.0f * s;
+        const float ox = 0.0f;
+        const float oy = 0.0f;
         const int talkFrame = (std::fmod(t, 0.8) < 0.4) ? 1 : 2;
-        if (!sprites_.draw("GodTalking.HC", talkFrame, ox + 44.0f * s, oy + 99.0f * s, s)) {
-            drawPerson(ox + 80.0f * s, oy + 170.0f * s, 1.8 * s, false, {76, 42, 148});
+        if (!sprites_.draw("GodTalking.HC", talkFrame, ox + 44.0f * scale, oy + 99.0f * scale, scale)) {
+            drawPerson(ox + 80.0f * scale, oy + 170.0f * scale, 1.8 * scale, false, {76, 42, 148});
         }
 
-        const float bushX = ox + 213.0f * s;
-        const float bushY = oy + 91.0f * s;
-        if (!sprites_.draw("GodTalking.HC", 3, bushX, bushY, s)) {
+        const float bushX = ox + 213.0f * scale;
+        const float bushY = oy + 91.0f * scale;
+        if (!sprites_.draw("GodTalking.HC", 3, bushX, bushY, scale)) {
             drawBurningBush(bushX, bushY, t);
         }
 
-        for (int i = 0; i < 80; ++i) {
+        for (int i = 0; i < 256; ++i) {
             const double a1 = range(0.0, 2.0 * kPi);
             const double a2 = range(0.0, 2.0 * kPi);
-            const double r1 = std::sqrt(random()) * 34.0;
-            const double r2 = std::sqrt(random()) * 34.0;
-            line(bushX + 30.0f * s + std::cos(a1) * r1, bushY - 35.0f * s + std::sin(a1) * r1,
-                 bushX + 30.0f * s + std::cos(a2) * r2, bushY - 35.0f * s + std::sin(a2) * r2,
+            const double r1 = random() * random();
+            const double r2 = random() * random();
+            line((235.0f + 30.0f * r1 * std::cos(a1)) * scale,
+                 (56.0f + 30.0f * r1 * std::sin(a1)) * scale,
+                 (235.0f + 30.0f * r2 * std::cos(a2)) * scale,
+                 (40.0f + 30.0f * r2 * std::sin(a2)) * scale,
                  paletteCycle(t + i));
         }
 
         const double wave = std::fmod(t, 4.0) < 2.0 ? std::sin(t * kPi) : 0.0;
-        for (int i = 10; i < contentW - 10; ++i) {
-            line(i, h * 0.78f + 4.0 * wave * std::sin(i / 18.0),
-                 i + 1, h * 0.78f + 4.0 * wave * std::sin((i + 1) / 18.0), kBrown);
+        for (int i = 0; i < 120; ++i) {
+            line((i + 10) * scale, (110.0f + 4.0f * wave * std::sin(i / 6.0)) * scale,
+                 (i + 11) * scale, (110.0f + 4.0f * wave * std::sin((i + 1) / 6.0)) * scale,
+                 kBrown);
         }
 
         if (godTextLines_.empty()) godTextLines_ = textAssets_.randomGodText(rng_);
-        text(titleFont_, "God Says...", 42.0f, 44.0f, kRed);
         std::vector<std::string> body = godTextLines_;
         if (!body.empty() && body.front() == "God Says...") body.erase(body.begin());
-        text(font_, joinLines(body), 48.0f, 92.0f, kInk, std::min(640, contentW - 96));
-        text(smallFont_, "Esc returns.", 48.0f, h - 38.0f, kInk);
+        fill({0.0f, textY - 8.0f, static_cast<float>(contentW),
+              static_cast<float>(h) - textY + 8.0f},
+             kYellow);
+        text(font_, "God Says...", 18.0f, textY, kBlue);
+        text(smallFont_, joinLines(body), 18.0f, textY + 30.0f, {150, 0, 0},
+             std::max(260, contentW - 36));
+        text(smallFont_, "Press <ESC>.", 18.0f, h - 34.0f, kBlue);
     }
 
     HorebProjection projectHoreb(const HorebObj &obj, int contentW, int h) const
     {
-        const double dx = obj.x - horebX_;
-        const double dz = obj.z - horebZ_;
-        const double side = dx * std::cos(horebAngle_) - dz * std::sin(horebAngle_);
-        const double depth = dx * std::sin(horebAngle_) + dz * std::cos(horebAngle_);
-        if (depth <= 32.0 || depth > 4200.0) return {};
+        const double x0 = obj.x + horebX_;
+        const double y0 = obj.y;
+        const double z0 = obj.z + horebZ_;
+        const double side = x0 * std::cos(horebAngle_) - z0 * std::sin(horebAngle_);
+        const double depth = x0 * std::sin(horebAngle_) + z0 * std::cos(horebAngle_);
+        constexpr double pitch = 77.0 * kPi / 180.0;
+        const double y1 = y0 * std::cos(pitch) - depth * std::sin(pitch);
+        const double z1 = y0 * std::sin(pitch) + depth * std::cos(pitch);
+        if (z1 <= 0.0) return {};
 
-        const float horizon = h * 0.37f;
-        const double ground = clamp(500.0 / (depth + 500.0), 0.0, 1.0);
-        const float x = contentW * 0.5f +
-                        static_cast<float>(side * (contentW * 0.82) / (depth + 160.0));
-        const float y = horizon + static_cast<float>((h - horizon) * ground);
-        if (x < -180.0f || x > contentW + 180.0f) return {};
+        const double s = 100.0 / (std::abs(z1) + 50.0);
+        const float x = contentW * 0.5f + static_cast<float>(side * s);
+        const float y = static_cast<float>(h + y1 * s);
+        if (x < -220.0f || x > contentW + 220.0f || y < -160.0f || y > h + 120.0f) return {};
 
         HorebProjection p;
         p.visible = true;
         p.x = x;
         p.y = y;
-        p.scale = static_cast<float>(clamp(2.1 * ground, 0.10, 1.75));
-        p.depth = depth;
+        p.scale = static_cast<float>(clamp(s * 2.0, 0.08, 2.15));
+        p.depth = z1;
         p.side = side;
         return p;
     }
 
     void drawHorebObject(const HorebObj &obj, const HorebProjection &p, double t)
     {
+        if (obj.bi == 0) {
+            static constexpr std::array<Color, 4> pebbleColors = {
+                kBlack, Color{74, 74, 74}, Color{74, 74, 74}, Color{170, 170, 170},
+            };
+            line(p.x, p.y, p.x + 1.0f, p.y, pebbleColors[static_cast<size_t>(obj.seed & 3)]);
+            return;
+        }
+
         float scale = p.scale;
-        if (obj.bi == 1) scale *= 0.28f;
         if (obj.seed == 0) scale *= 1.2f;
 
-        if (!sprites_.draw("HorebA.HC", obj.bi, p.x, p.y, scale)) {
-            if (obj.bi == 1) {
-                filledCircle(p.x, p.y, std::max(2.0f, scale * 5.0f), {86, 78, 72});
+        const bool mirror = (obj.bi == 6 || obj.bi == 7 || obj.bi == 8) && obj.mirror;
+        if (!sprites_.draw("HorebA.HC", obj.bi, p.x, p.y, scale, 255, mirror)) {
+            if (obj.bi == 1 || obj.bi == 2) {
+                line(p.x, p.y, p.x - 12.0f * scale, p.y + 30.0f * scale, kBrown);
+                line(p.x, p.y, p.x + 12.0f * scale, p.y + 30.0f * scale, kBrown);
+                filledCircle(p.x - 8.0f * scale, p.y - 10.0f * scale, 9.0f * scale, {45, 154, 65});
+                filledCircle(p.x + 8.0f * scale, p.y - 8.0f * scale, 8.0f * scale, {54, 184, 73});
+            } else if (obj.bi == 3) {
+                thickLine(p.x - 18.0f * scale, p.y + 16.0f * scale,
+                          p.x + 20.0f * scale, p.y + 4.0f * scale,
+                          std::max(1.0f, 4.0f * scale), kBrown);
+            } else if (obj.bi == 4 || obj.bi == 5) {
+                line(p.x, p.y, p.x + std::sin(obj.seed) * 18.0f * scale, p.y - 42.0f * scale, kBrown);
+                filledCircle(p.x, p.y - 34.0f * scale, 12.0f * scale, {39, 108, 63});
             } else if (obj.bi >= 6) {
-                drawPerson(p.x, p.y, scale * 0.9, obj.seed % 2 == 0, {236, 236, 220});
-            } else {
-                line(p.x, p.y, p.x + std::sin(obj.seed) * 15.0f * scale, p.y - 30.0f * scale, kBrown);
-                filledCircle(p.x, p.y - 28.0f * scale, 9.0f * scale, {39, 108, 63});
+                drawPerson(p.x, p.y, scale * 0.9, mirror, {236, 236, 220});
             }
         }
 
@@ -2335,32 +2679,33 @@ private:
         }
     }
 
+    void drawHorebDocument(int contentW, int h)
+    {
+        const float rowH = static_cast<float>(clamp(h / 72.0, 8.0, 12.0));
+        const float cyanH = rowH * 6.0f;
+        const float verseY = rowH * 36.0f;
+        fill({0, 0, static_cast<float>(contentW), cyanH}, {104, 225, 235});
+        fill({0, cyanH, static_cast<float>(contentW), static_cast<float>(h) - cyanH}, kYellow);
+        text(smallFont_, joinLines(textAssets_.bibleVerse("Exodus", "3:1", 21)),
+             18.0f, verseY, kBlue, std::max(260, contentW - 36));
+    }
+
     void drawHoreb(int contentW, int h, double t)
     {
-        fill({0, 0, static_cast<float>(contentW), static_cast<float>(h)}, {112, 191, 231});
-        const float horizon = h * 0.37f;
-        for (int y = 0; y < static_cast<int>(horizon); y += 4) {
-            const float mix = static_cast<float>(y) / std::max(1.0f, horizon);
-            setDraw(blend({55, 136, 210}, {190, 220, 232}, mix));
-            SDL_RenderLine(renderer_, 0.0f, static_cast<float>(y),
-                           static_cast<float>(contentW), static_cast<float>(y));
-        }
-        fill({0, horizon, static_cast<float>(contentW), h - horizon}, {203, 151, 78});
-        triangle({{0.0f, horizon}, {contentW * 0.28f, h * 0.16f}, {contentW * 0.56f, horizon}},
-                 {111, 88, 78});
-        triangle({{contentW * 0.35f, horizon}, {contentW * 0.67f, h * 0.12f},
-                  {static_cast<float>(contentW), horizon}},
-                 {131, 101, 77});
+        drawHorebDocument(contentW, h);
 
         const float cx = contentW * 0.5f;
-        for (int i = -8; i <= 8; ++i) {
-            const float endX = cx + i * contentW * 0.115f -
-                               static_cast<float>(std::sin(horebAngle_) * contentW * 0.18);
-            line(cx, horizon, endX, h, {134, 96, 56, 130});
-        }
-        for (int i = 1; i < 11; ++i) {
-            const float y = horizon + (h - horizon) * (i * i) / 122.0f;
-            line(0.0, y, contentW, y + std::sin(horebAngle_ + i) * 8.0, {176, 121, 62, 110});
+        const double sunX0 = horebX_;
+        const double sunZ0 = 1000000.0 + horebZ_;
+        const double sunSide = sunX0 * std::cos(horebAngle_) - sunZ0 * std::sin(horebAngle_);
+        const double sunDepth = sunX0 * std::sin(horebAngle_) + sunZ0 * std::cos(horebAngle_);
+        const double sunY = -std::sin(77.0 * kPi / 180.0) * sunDepth;
+        const double sunZ = std::cos(77.0 * kPi / 180.0) * sunDepth;
+        if (sunY < 0.0 && sunZ > 0.0) {
+            const double sunS = 100.0 / (std::abs(sunZ) + 50.0);
+            const float sunX = cx + static_cast<float>(sunSide * sunS);
+            filledCircle(sunX, 15.0f, 17.0f, kBrown);
+            filledCircle(sunX, 15.0f, 15.0f, kYellow);
         }
 
         struct DrawItem {
@@ -2382,32 +2727,42 @@ private:
 
         if (!horebObjs_.empty()) {
             const HorebProjection bush = projectHoreb(horebObjs_.front(), contentW, h);
-            const float targetY = h * 0.56f;
             const double screenDistance = bush.visible
-                                              ? std::hypot(bush.x - cx, bush.y - targetY)
+                                              ? std::hypot(bush.x - cx, bush.y - static_cast<float>(h))
                                               : 100000.0;
-            if (!horebFound_ && bush.visible && bush.depth < 520.0 && screenDistance < 170.0) {
+            if (!horebFound_ && bush.visible && screenDistance < 300.0) {
                 horebFound_ = true;
                 horebFoundTime_ = nowSeconds();
-                audio_.cue(659.25, 0.22);
             }
         }
 
-        drawVersePanel("Exodus", "3:1", 21, contentW, 150);
-        if (horebFound_) {
-            text(font_, "Burning Bush Found.", contentW * 0.5f - 86.0f, h * 0.5f - 11.0f, kYellow);
-        } else if (std::fmod(t, 1.0) < 0.58) {
+        if (!horebFound_ && std::fmod(t, 1.0) < 0.58) {
             text(font_, "Find the Burning Bush.", contentW * 0.5f - 104.0f,
                  h * 0.5f - 11.0f, kRed);
         }
-        text(smallFont_, "Arrow keys move and turn.", 34.0f, h - 34.0f, kInk);
     }
 
     void drawCloudScene(int contentW, int h, double t)
     {
-        sceneBackdrop(contentW, h);
-        for (const auto &cloud : clouds_) drawCloud(cloud, t);
-        drawVersePanel("Exodus", "14:19", 7, contentW, 120);
+        const float rowH = static_cast<float>(clamp(h / 36.0, 12.0, 16.0));
+        const float skyH = static_cast<float>(cloudSkyHeight(h));
+        const float yellowStart = skyH;
+        const float verseY = yellowStart + rowH * 5.0f;
+        fill({0, 0, static_cast<float>(contentW), skyH}, {104, 225, 235});
+        fill({0, yellowStart, static_cast<float>(contentW), static_cast<float>(h) - yellowStart}, kYellow);
+        if (!sprites_.draw("Clouds.HC", 1, 0.0f, skyH, static_cast<float>(contentW) / 640.0f) &&
+            !sprites_.draw("Mountain.HC", 1, 0.0f, skyH, static_cast<float>(contentW) / 640.0f)) {
+            triangle({{0.0f, skyH + 58.0f}, {contentW * 0.32f, skyH - 128.0f},
+                      {contentW * 0.62f, skyH + 58.0f}},
+                     {118, 97, 87});
+            triangle({{contentW * 0.24f, skyH + 58.0f}, {contentW * 0.56f, skyH - 144.0f},
+                      {static_cast<float>(contentW), skyH + 58.0f}},
+                     {137, 112, 91});
+        }
+        for (const auto &cloud : clouds_) drawCloud(cloud);
+        text(smallFont_, joinLines(textAssets_.bibleVerse("Exodus", "14:19", 7)),
+             18.0f, verseY, kBlue, std::max(260, contentW - 36));
+        (void)t;
     }
 
     void drawCourt(int contentW, int h)
@@ -2424,18 +2779,11 @@ private:
             fill(rects[i], colors[i]);
             text(font_, labels[i], rects[i].x + 16.0f, rects[i].y + 12.0f, kBlack);
         }
-        if (!courtResult_.empty()) {
-            text(font_, courtResult_, contentW * 0.14f, h * 0.59f, kBlue, static_cast<int>(contentW * 0.66));
-        }
     }
 
     void drawMap(int contentW, int h)
     {
-        fill({0, 0, static_cast<float>(contentW), static_cast<float>(h)}, {227, 190, 96});
-        for (int i = 0; i < 34; ++i) {
-            const float y = static_cast<float>((i * 43) % std::max(1, h));
-            line(0.0, y, contentW, y + std::sin(i) * 50.0, {196, 139, 70, 85});
-        }
+        fill({0, 0, static_cast<float>(contentW), static_cast<float>(h)}, kYellow);
 
         const float cx = contentW * 0.5f;
         const float cy = h * 0.5f;
@@ -2446,45 +2794,43 @@ private:
         }
         if (!mapPath_.empty()) {
             const SDL_FPoint p = mapPath_.back();
-            const bool left = mapAngle_ > kPi / 2 || mapAngle_ < -kPi / 2;
             const std::array<int, 4> right = {2, 3, 4, 3};
             const std::array<int, 4> leftFrames = {5, 6, 7, 6};
             const int frame = (static_cast<int>(std::floor(nowSeconds() * 6.0)) +
                                static_cast<int>(mapPath_.size())) & 3;
-            const int bi = left ? leftFrames[frame] : right[frame];
+            const int bi = mapLastLeft_ ? leftFrames[frame] : right[frame];
             if (!sprites_.draw("Mountain.HC", bi, cx + p.x, cy + p.y, 1.8f)) {
-                drawPerson(cx + p.x, cy + p.y, 1.15, left, {76, 42, 148});
+                drawPerson(cx + p.x, cy + p.y, 1.15, mapLastLeft_, {76, 42, 148});
             }
         }
-        drawVersePanel("Exodus", "16:35", 3, contentW, 108);
+        text(smallFont_, joinLines(textAssets_.bibleVerse("Exodus", "16:35", 3)),
+             18.0f, 24.0f, kBlue, std::max(260, contentW - 36));
     }
 
     void drawWaterRock(int contentW, int h, double t)
     {
-        sceneBackdrop(contentW, h, true);
-        const float cx = contentW * 0.48f;
-        const float cy = h * 0.56f;
-        if (!sprites_.draw("WaterRock.HC", 5, cx - 25.0f, cy + 80.0f, 5.2f)) {
-            fill({cx - 90.0f, cy - 10.0f, 130.0f, 92.0f}, kRock);
-            triangle({{cx - 120.0f, cy + 82.0f}, {cx - 70.0f, cy - 28.0f}, {cx + 48.0f, cy + 82.0f}}, kRock);
-            triangle({{cx - 90.0f, cy + 82.0f}, {cx + 20.0f, cy - 10.0f}, {cx + 82.0f, cy + 82.0f}}, {121, 112, 102});
-        }
+        fill({0, 0, static_cast<float>(contentW), static_cast<float>(h)}, kYellow);
+
+        const float sceneScale = static_cast<float>(clamp(std::min(contentW / 640.0, h / 480.0), 0.85, 1.8));
+        const float cx = contentW * 0.5f;
+        const float cy = h * 0.5f;
+        const float rockX = cx - 64.0f * sceneScale;
+        const float rockY = cy - 4.0f * sceneScale;
+        const float waterX = cx - 63.0f * sceneScale;
+        const float waterY = cy - 20.0f * sceneScale;
 
         constexpr double downDelay = 0.075;
         constexpr double upTime = 0.2;
+        constexpr double spreadRate = 5.0;
         const bool waterMade = waterDownTime_ >= 0.0 && t - waterDownTime_ >= downDelay;
         const double age = waterMade ? t - waterDownTime_ - downDelay : -1.0;
         if (waterMade) {
-            const float pulse = static_cast<float>(std::sin(t * 5.5) * 3.0);
-            const float r = static_cast<float>(std::min(110.0, 18.0 + age * 44.0));
-            filledCircle(cx - 72.0f, cy + 18.0f, std::min(r, 48.0f) + pulse, {36, 150, 220, 190});
-            ring(cx - 72.0f, cy + 18.0f, std::min(110.0f, r + pulse), kWater);
-            triangle({{cx - 74.0f, cy + 18.0f}, {cx - 6.0f, static_cast<float>(h)},
-                      {cx - 130.0f, static_cast<float>(h)}},
-                     {39, 154, 220, 180});
-            for (int i = 0; i < 5; ++i) {
-                const float x = cx - 110.0f + i * 22.0f + static_cast<float>(std::sin(t * 3.0 + i) * 8.0);
-                line(x, cy + 70.0f, x + 28.0f, h, {160, 232, 255, 120});
+            const float r = static_cast<float>(std::min(17.0, spreadRate * age) * sceneScale);
+            if (r > 0.0f) {
+                ring(waterX, waterY, std::max(1.0f, r), kBlue);
+                if (r >= 2.0f * sceneScale) {
+                    filledCircle(waterX, waterY, r - 1.0f, kBlue);
+                }
             }
         }
 
@@ -2498,9 +2844,19 @@ private:
         if (arm > 0.66f) mosesBi = 4;
         else if (arm > 0.20f) mosesBi = 3;
         else if (std::fmod(t, 1.2) >= 0.6) mosesBi = 2;
-        if (!sprites_.draw("WaterRock.HC", mosesBi, cx + 150.0f, cy + 82.0f, 1.45f)) {
-            drawPerson(cx + 150.0f, cy + 70.0f, 1.55, true, {76, 42, 148});
-            line(cx + 124.0f, cy + 22.0f + arm * 28.0f, cx + 50.0f, cy - 38.0f + arm * 88.0f, kBrown);
+        if (!sprites_.draw("WaterRock.HC", mosesBi, cx, cy, sceneScale)) {
+            drawPerson(cx, cy + 10.0f * sceneScale, 1.35 * sceneScale, true, {76, 42, 148});
+            line(cx - 18.0f * sceneScale, cy - 28.0f * sceneScale + arm * 24.0f * sceneScale,
+                 cx - 70.0f * sceneScale, cy - 70.0f * sceneScale + arm * 76.0f * sceneScale, kBrown);
+        }
+        if (!sprites_.draw("WaterRock.HC", 5, rockX, rockY, sceneScale)) {
+            fill({rockX - 26.0f * sceneScale, rockY - 10.0f * sceneScale,
+                  52.0f * sceneScale, 34.0f * sceneScale},
+                 kRock);
+            triangle({{rockX - 42.0f * sceneScale, rockY + 28.0f * sceneScale},
+                      {rockX - 14.0f * sceneScale, rockY - 30.0f * sceneScale},
+                      {rockX + 30.0f * sceneScale, rockY + 28.0f * sceneScale}},
+                     kRock);
         }
         drawVersePanel("Exodus", "17:6", 4, contentW, 118);
         text(font_, "<SPACE>", 34.0f, 126.0f, kInk);
@@ -2508,12 +2864,8 @@ private:
 
     void drawBattle(int contentW, int h, double t)
     {
-        sceneBackdrop(contentW, h);
-        fill({0, h * 0.62f, static_cast<float>(contentW), h * 0.38f}, {155, 100, 59});
-        triangle({{contentW * 0.25f, h * 0.72f}, {contentW * 0.5f, h * 0.42f},
-                  {contentW * 0.75f, h * 0.72f}},
-                 {118, 86, 63});
-        const float sceneScale = std::min(contentW / 640.0f, h / 480.0f);
+        fill({0, 0, static_cast<float>(contentW), static_cast<float>(h)}, kYellow);
+        const float sceneScale = static_cast<float>(clamp(std::min(contentW / 640.0, h / 480.0), 0.85, 1.8));
         const float cx = contentW * 0.5f;
         const float cy = h * 0.5f;
         const float spacing = 45.0f * sceneScale;
@@ -2531,9 +2883,7 @@ private:
         }};
         const std::array<double, 3> phase = {0.0, 0.333, 0.666};
         for (size_t i = 0; i < fighters.size(); ++i) {
-            double saw = std::fmod(t + phase[i] * 0.25, 0.25) / 0.25;
-            saw *= 2.0;
-            if (saw > 1.0) saw = 2.0 - saw;
+            const double saw = battleHack(t, phase[i]);
             const int bi = saw > 0.5 ? 2 : 1;
             if (!sprites_.draw("Battle.HC", bi, fighters[i].x, fighters[i].y, sceneScale)) {
                 drawFighter(fighters[i].x, fighters[i].y, true, t + i);
@@ -2554,18 +2904,33 @@ private:
             return;
         }
 
-        sceneBackdrop(contentW, h);
-        const float skyH = h * 0.58f;
-        fill({0, skyH, static_cast<float>(contentW), h - skyH}, {219, 184, 85});
+        const float skyH = h * 0.60f;
+        const float sceneScale = static_cast<float>(clamp(std::min(contentW / 640.0, h / 480.0), 0.85, 1.8));
+        fill({0, 0, static_cast<float>(contentW), skyH}, {104, 225, 235});
+        fill({0, skyH, static_cast<float>(contentW), h - skyH}, kYellow);
+        if (!sprites_.draw("Quail.HC", 4, 0.0f, skyH, static_cast<float>(contentW) / 640.0f) &&
+            !sprites_.draw("Mountain.HC", 1, 0.0f, skyH, static_cast<float>(contentW) / 640.0f)) {
+            triangle({{0.0f, skyH + 58.0f}, {contentW * 0.32f, skyH - 128.0f},
+                      {contentW * 0.62f, skyH + 58.0f}},
+                     {118, 97, 87});
+            triangle({{contentW * 0.24f, skyH + 58.0f}, {contentW * 0.56f, skyH - 144.0f},
+                      {static_cast<float>(contentW), skyH + 58.0f}},
+                     {137, 112, 91});
+        }
+        const double t1 = t - sceneStart_;
         for (const auto &q : quail_) {
             if (q.dead) {
-                if (!sprites_.draw("Quail.HC", 3, static_cast<float>(q.x), static_cast<float>(q.y), 0.72f)) {
+                if (!sprites_.draw("Quail.HC", 3, static_cast<float>(q.x), static_cast<float>(q.y), sceneScale)) {
                     drawDeadBird(q.x, q.y);
                 }
             } else {
-                const int bi = std::sin((t + q.phase) * 8.0) >= 0.0 ? 1 : 2;
-                if (!sprites_.draw("Quail.HC", bi, static_cast<float>(q.x), static_cast<float>(q.y), 0.72f)) {
-                    drawBird(q.x, q.y, 8.0 + 5.0 * std::sin((t + q.phase) * 8.0));
+                double flap = std::fmod(t1 + q.phase, 1.0);
+                if (flap < 0.0) flap += 1.0;
+                flap *= 2.0;
+                if (flap > 1.0) flap = 2.0 - flap;
+                const int bi = flap > 0.5 ? 2 : 1;
+                if (!sprites_.draw("Quail.HC", bi, static_cast<float>(q.x), static_cast<float>(q.y), sceneScale)) {
+                    drawBird(q.x, q.y, 8.0 + 5.0 * flap);
                 }
             }
         }
@@ -2835,18 +3200,19 @@ private:
         }
     }
 
-    void drawCloud(const Cloud &cloud, double t)
+    void drawCloud(const Cloud &cloud)
     {
-        std::mt19937 local(cloud.seed);
-        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-        for (int i = 0; i < 120; ++i) {
-            const float ox = dist(local) * 88.0f * static_cast<float>(cloud.scale) +
-                             std::sin(t * 0.7 + i) * 2.0f;
-            const float oy = dist(local) * 32.0f * static_cast<float>(cloud.scale) +
-                             std::cos(t * 0.5 + i * 0.7f) * 1.5f;
-            const float rr = (2.0f + std::abs(dist(local)) * 5.5f) * static_cast<float>(cloud.scale);
-            const Color color = i % 4 == 0 ? Color{210, 212, 218, 185} : Color{250, 250, 250, 215};
-            filledCircle(static_cast<float>(cloud.x) + ox, static_cast<float>(cloud.y) + oy, rr, color);
+        for (size_t i = 0; i < cloud.points.size(); ++i) {
+            const CloudPoint &point = cloud.points[i];
+            const CloudPen &pen = cloudPens_[i & (kCloudPens - 1)];
+            const Color color = point.shade < cloud.color ? Color{170, 170, 170} : kWhite;
+            const float baseX = static_cast<float>(cloud.x + point.x);
+            const float baseY = static_cast<float>(cloud.y + point.y);
+            for (const SDL_Point &penPoint : pen.points) {
+                const float x = baseX + static_cast<float>(penPoint.x);
+                const float y = baseY + static_cast<float>(penPoint.y);
+                line(x, y, x + 1.0f, y, color);
+            }
         }
     }
 
@@ -2985,11 +3351,6 @@ private:
         const float y = panel.y;
         const float w = panel.w;
         const float h = panel.h;
-        fill({x + 10, y + 10, w - 20, h - 20}, index % 2 ? Color{98, 177, 214} : Color{221, 179, 86});
-        triangle({{x + 20, y + h - 20}, {x + w * 0.36f, y + h * 0.28f}, {x + w * 0.62f, y + h - 20}},
-                 {116, 93, 82});
-        triangle({{x + w * 0.32f, y + h - 20}, {x + w * 0.65f, y + h * 0.22f}, {x + w - 18, y + h - 20}},
-                 {134, 108, 84});
 
         if (index >= 0 && static_cast<size_t>(index) < comicFiles_.size()) {
             const std::string &file = comicFiles_[static_cast<size_t>(index)];
@@ -3001,28 +3362,6 @@ private:
             const float scale = (w - 36.0f) / 640.0f;
             if (sprites_.draw(file, bi, x + 18.0f, y + h * 0.66f, scale)) return;
         }
-
-        if (index == 1) {
-            drawBurningBush(x + w * 0.67f, y + h * 0.52f, nowSeconds());
-        }
-        if (index == 3) {
-            fill({x + 34.0f, y + h * 0.58f, w - 68.0f, h * 0.22f}, kWater);
-            triangle({{x + w * 0.42f, y + h * 0.78f}, {x + w * 0.5f, y + h * 0.42f},
-                      {x + w * 0.58f, y + h * 0.78f}},
-                     {235, 211, 128});
-        }
-        if (index == 5) {
-            fill({x + w * 0.55f, y + h * 0.55f, 90.0f, 60.0f}, kRock);
-            triangle({{x + w * 0.56f, y + h * 0.65f}, {x + w * 0.42f, y + h - 20},
-                      {x + w * 0.76f, y + h - 20}},
-                     kWater);
-        }
-        if (index == 6) {
-            for (int i = 0; i < 24; ++i) drawBird(x + 54 + (i * 37) % static_cast<int>(w - 100),
-                                                   y + 48 + (i * 23) % static_cast<int>(h * 0.48), 8.0);
-        }
-        drawPerson(x + w * 0.28f, y + h * 0.72f, 2.2, false, {76, 42, 148});
-        drawPerson(x + w * 0.38f, y + h * 0.74f, 1.8, false, {58, 106, 174});
     }
 
     void drawHelp(int contentW, int h)
